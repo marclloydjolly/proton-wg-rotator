@@ -1,0 +1,35 @@
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# ---- Secrets and account-specific state — NEVER COMMIT ----
+# These hold your Proton cert, WireGuard private key, SRP session,
+# SMTP password, and server pool picked for your account.
+state/
+configs/
+library.json
+*.pem
+*.key
+*.conf
+
+# But we DO want to ship the example systemd units:
+!systemd/*.service
+!systemd/*.timer

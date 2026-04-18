@@ -1,0 +1,16 @@
+[Unit]
+Description=ProtonVPN WireGuard library refresh
+Documentation=https://github.com/marclloydjolly/proton-wg-rotator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as the user who installed the project; only needs to talk to the
+# Proton API and re-render config files. Does NOT touch live tunnels.
+User=REPLACE_WITH_YOUR_USER
+Group=REPLACE_WITH_YOUR_USER
+WorkingDirectory=REPLACE_WITH_PROJECT_ROOT
+ExecStart=REPLACE_WITH_PROJECT_ROOT/.venv/bin/protonwg refresh
+StandardOutput=journal
+StandardError=journal

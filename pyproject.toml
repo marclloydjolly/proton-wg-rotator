@@ -1,0 +1,21 @@
+[project]
+name = "protonwg"
+version = "0.1.0"
+description = "Maintain a rotating pool of ProtonVPN WireGuard configs for load-balanced routing."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "cryptography>=42.0",
+    "pynacl>=1.5",
+    "proton-client",
+]
+
+[project.scripts]
+protonwg = "protonwg.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

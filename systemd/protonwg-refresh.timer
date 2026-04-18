@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightly ProtonVPN library refresh (out-of-hours)
+Documentation=https://github.com/marclloydjolly/proton-wg-rotator
+
+[Timer]
+# Runs once a day at 02:30 local time, with up to 10 minutes of random
+# jitter so many installs don't hit Proton's API simultaneously.
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=protonwg-refresh.service
+
+[Install]
+WantedBy=timers.target

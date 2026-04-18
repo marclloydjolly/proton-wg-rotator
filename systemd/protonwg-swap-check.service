@@ -1,0 +1,20 @@
+[Unit]
+Description=ProtonVPN WireGuard hot-loop swap check
+Documentation=https://github.com/marclloydjolly/proton-wg-rotator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Must run as root: needs to query wg, rewrite /etc/wireguard/wg0.conf,
+# and systemctl restart wg-quick@wg0.
+User=root
+WorkingDirectory=REPLACE_WITH_PROJECT_ROOT
+ExecStart=REPLACE_WITH_PROJECT_ROOT/.venv/bin/protonwg swap-check
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=60
+
+# Optional tuning: override the policy on the ExecStart line above, e.g.
+#   ExecStart=…/protonwg swap-check --min-improvement 10 --min-interval-minutes 120
+# Defaults are --min-improvement 20 --min-interval-minutes 30.
