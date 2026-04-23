@@ -1,0 +1,19 @@
+[Unit]
+Description=ProtonVPN WireGuard liveness probe + self-heal
+Documentation=https://github.com/marclloydjolly/proton-wg-rotator
+After=network.target
+
+[Service]
+Type=oneshot
+# Must run as root: ping, systemctl stop wg-quick@*, cp into /etc/wireguard/.
+User=root
+WorkingDirectory=REPLACE_WITH_PROJECT_ROOT
+ExecStart=REPLACE_WITH_PROJECT_ROOT/.venv/bin/protonwg health-check
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=45s
+
+# Tuning examples — append flags to ExecStart above:
+#   --probe-target 1.1.1.1          (use Cloudflare instead of Google DNS)
+#   --probe-count 5 --probe-timeout 3   (more patient before declaring dead)
+#   --lan-gateway 192.168.1.1       (override the library's stored value)

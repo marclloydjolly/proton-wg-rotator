@@ -24,26 +24,35 @@ regenerate a config by hand. This tool automates the whole loop.
 
 ## How it works
 
-Three cooperating pieces:
+Four cooperating pieces — one manual, three on systemd timers:
 
 ```
-  ┌─────────────────┐      ┌──────────────────┐      ┌──────────────────┐
-  │ protonwg init   │      │ protonwg refresh │      │ protonwg         │
-  │ (once)          │      │ (nightly timer)  │      │ swap-check       │
-  │                 │      │                  │      │ (every 5 min)    │
-  │ - SRP login     │      │ - Rotate cert    │      │                  │
-  │ - Generate 1    │      │   near expiry    │      │ - Poll /vpn/loads│
-  │   Ed25519 key   │      │ - Replace dead   │      │ - Rank pool      │
-  │ - Register 1    │      │   servers        │      │ - Swap wg0 if a  │
-  │   cert (365d)   │      │ - Re-render .conf│      │   better server  │
-  │ - Fetch logicals│      │   files          │      │   is available   │
-  │ - Pick N servers│      │ - Email you      │      │ - Handshake check│
-  │   across        │      │   a report       │      │   + auto-rollback│
-  │   distinct IPs  │      │                  │      │ - Email on swap  │
-  │ - Write configs/│      │                  │      │                  │
-  │   gb-lon-NN.conf│      │                  │      │                  │
-  └─────────────────┘      └──────────────────┘      └──────────────────┘
+  ┌─────────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+  │ protonwg init   │   │  refresh     │   │  swap-check  │   │ health-check │
+  │ (once, manual)  │   │  (nightly)   │   │  (every 5m)  │   │  (every 30s) │
+  │                 │   │              │   │              │   │              │
+  │ - SRP login     │   │ - Rotate     │   │ - Poll       │   │ - Ping       │
+  │ - One Ed25519   │   │   cert near  │   │   /vpn/loads │   │   8.8.8.8    │
+  │   key + one     │   │   expiry     │   │ - Rank pool  │   │ - If fail:   │
+  │   cert (365d)   │   │ - Replace    │   │ - Swap if    │   │   stop wg0,  │
+  │ - Pick N pool   │   │   dead       │   │   ≥20% score │   │   bootstrap- │
+  │   servers       │   │   servers    │   │   win        │   │   swap to    │
+  │   (distinct IPs)│   │ - Re-render  │   │ - Auto-      │   │   best alive │
+  │ - Emit configs/ │   │   .conf      │   │   rollback   │   │   candidate  │
+  │   gb-lon-NN.conf│   │ - Email you  │   │ - Email      │   │ - Email      │
+  └─────────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
+     OPTIMISATION ─────────────────────▶                     LIVENESS ◀──────
 ```
+
+- **`swap-check`** is for *optimisation* — rotate to a better server when one
+  exists. Runs every 5 minutes, respects hysteresis (default 20% better, 30 min
+  cooldown), needs internet to reach `/vpn/loads`.
+- **`health-check`** is for *liveness* — self-heal when the active tunnel dies.
+  Runs every 30 seconds with a cheap ICMP probe (no API calls in the happy
+  path). Critically, when the probe fails it **stops `wg0` first** so the LAN
+  default route is restored, *then* queries `/vpn/loads` to pick a replacement.
+  That breaks the chicken-and-egg problem where the thing that's broken is also
+  the only route out.
 
 A single ProtonVPN WireGuard certificate authorises the whole pool. You
 don't register a cert per server — you register one, and the tool just swaps
@@ -177,20 +186,28 @@ The `ip=` should resolve to a Proton gateway (check
 
 ### 5. Install systemd timers
 
-Copy the example units, fill in paths, and enable:
+Copy the example units, fill in paths, and enable all three:
 
 ```bash
 sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
-# Edit the copies: replace REPLACE_WITH_YOUR_USER and REPLACE_WITH_PROJECT_ROOT
+
+# Edit each .service: replace REPLACE_WITH_YOUR_USER and REPLACE_WITH_PROJECT_ROOT.
+# (health-check already runs as User=root by design — no placeholder to swap.)
 sudoedit /etc/systemd/system/protonwg-refresh.service
 sudoedit /etc/systemd/system/protonwg-swap-check.service
+sudoedit /etc/systemd/system/protonwg-health-check.service   # only the WorkingDirectory/ExecStart paths
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now protonwg-refresh.timer
-sudo systemctl enable --now protonwg-swap-check.timer
+sudo systemctl enable --now protonwg-refresh.timer       # nightly maintenance
+sudo systemctl enable --now protonwg-swap-check.timer    # 5-min optimisation
+sudo systemctl enable --now protonwg-health-check.timer  # 30-sec liveness + self-heal
 
 systemctl list-timers 'protonwg-*'
 ```
+
+You can enable any subset. A common minimal install is `refresh` + `health-check`
+only (no periodic optimisation; just keep the tunnel alive and the library
+maintained). A pure optimisation-focused install skips `health-check`.
 
 ### 6. (Optional) Tune the swap policy
 
@@ -226,11 +243,17 @@ protonwg list
 # Watch the hot-loop live.
 sudo journalctl -u protonwg-swap-check -f
 
+# Watch health-check's 30-second probe (mostly silent — only logs on recovery).
+sudo journalctl -u protonwg-health-check -f
+
 # Last few refresh runs.
 sudo journalctl -u protonwg-refresh --since today
 
 # Force an immediate swap-check run.
 sudo systemctl start protonwg-swap-check.service
+
+# Force an immediate health-check run (useful for testing).
+sudo systemctl start protonwg-health-check.service
 
 # Re-pick the pool against current best-by-distinct-IP without burning a new cert.
 protonwg rebuild-pool
@@ -251,8 +274,12 @@ protonwg refresh            Nightly maintenance: rotate cert if near expiry,
                             replace dead servers, re-render configs.
 protonwg list               Pretty-print the current pool + cert expiry.
 
-protonwg swap-check         The hot loop: poll /vpn/loads, swap if warranted.
+protonwg swap-check         Optimisation loop: poll /vpn/loads, swap if a
+                            better pool entry exists (≥20% score win, default).
 protonwg swap-status        Preview what swap-check would decide now.
+protonwg health-check       Liveness probe: ping the internet; on failure,
+                            stop wg0 and bootstrap-swap to the best alive
+                            candidate. Fires every 30s via its own timer.
 
 protonwg notify-setup       Interactively configure SMTP for email reports.
 protonwg notify-test        Send a synthetic report to verify SMTP works.

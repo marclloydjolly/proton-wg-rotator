@@ -1,0 +1,14 @@
+[Unit]
+Description=ProtonVPN WireGuard liveness probe (every 30 seconds)
+Documentation=https://github.com/marclloydjolly/proton-wg-rotator
+
+[Timer]
+# First run 1 minute after boot (let network stabilise), then every 30s.
+OnBootSec=1min
+OnUnitActiveSec=30s
+# Accept up to 5s of slop for battery/CPU friendliness.
+AccuracySec=5s
+Unit=protonwg-health-check.service
+
+[Install]
+WantedBy=timers.target
