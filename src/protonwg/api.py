@@ -19,15 +19,28 @@ from pathlib import Path
 from typing import Any
 
 from proton.api import Session
+from proton.exceptions import ProtonError
 
 # See research notes: Linux-app version string; web-* triggers CAPTCHA (code 9001).
 API_URL = "https://vpn-api.proton.me"
 APP_VERSION = "linux-vpn@4.13.1"
 USER_AGENT = "ProtonVPN/4.13.1 (Linux; Ubuntu)"
 
+# Proton API error strings we recognise as "access token expired, try refresh".
+# We match on substring because ProtonError exposes the message as str() only.
+_AUTH_EXPIRED_MARKERS = (
+    "Invalid access token",
+    "Access token is invalid",
+    "Authentication required",
+)
+
 
 class ProtonAPIError(RuntimeError):
     """Raised when a Proton API call returns a non-success Code."""
+
+
+class ProtonAuthRefreshFailed(ProtonAPIError):
+    """The refresh token is also expired; the user must re-run `protonwg login`."""
 
 
 @dataclass
@@ -119,12 +132,44 @@ class ProtonClient:
         *,
         jsondata: dict[str, Any] | None = None,
         method: str | None = None,
+        _retried_after_refresh: bool = False,
     ) -> dict[str, Any]:
         sess = self._ensure_session()
         try:
-            resp = sess.api_request(endpoint, jsondata=jsondata, method=method)
+            try:
+                resp = sess.api_request(endpoint, jsondata=jsondata, method=method)
+            except ProtonError as exc:
+                # The cached SRP access token has a short lifetime (typically
+                # ~24h). When it expires the server returns "Invalid access
+                # token" — we should swap it for a fresh one using the
+                # long-lived refresh token, persist the new session, and retry
+                # the original call. If refresh itself fails (refresh token
+                # also expired, account changed, etc.) the user has to
+                # re-login.
+                msg = str(exc)
+                is_auth_expired = any(m in msg for m in _AUTH_EXPIRED_MARKERS)
+                if not is_auth_expired or _retried_after_refresh:
+                    raise
+                try:
+                    sess.refresh()
+                except ProtonError as refresh_exc:
+                    raise ProtonAuthRefreshFailed(
+                        "Cached session expired and refresh failed "
+                        f"({refresh_exc}). Run `protonwg login` to "
+                        "re-authenticate."
+                    ) from refresh_exc
+                # Persist the rotated tokens before retrying so a crash
+                # mid-retry doesn't leave the stale token on disk.
+                self._save()
+                return self._call(
+                    endpoint,
+                    jsondata=jsondata,
+                    method=method,
+                    _retried_after_refresh=True,
+                )
         finally:
-            # proton-client rotates refresh tokens; re-persist after every call.
+            # proton-client rotates refresh tokens; re-persist after every
+            # successful call. (No-op if `refresh()` already saved.)
             self._save()
         if not isinstance(resp, dict):
             raise ProtonAPIError(f"Unexpected response type: {type(resp)}")
