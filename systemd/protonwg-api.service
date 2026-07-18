@@ -9,17 +9,21 @@ Type=simple
 # `systemctl start protonwg-*.service` on behalf of frontend actions.
 User=root
 WorkingDirectory=REPLACE_WITH_PROJECT_ROOT
+
+# Loopback bind (safe default; no auth needed; only same-host processes can reach it):
+#   ExecStart=REPLACE_WITH_PROJECT_ROOT/.venv/bin/protonwg api --bind-host 127.0.0.1 --bind-port 8787
+#
+# LAN bind (bearer token required, auto-generated in state/api-token):
+#   ExecStart=REPLACE_WITH_PROJECT_ROOT/.venv/bin/protonwg api --bind-host <YOUR_LAN_IP> --bind-port 8787
+#
+# All interfaces including any VPN tunnels — 0.0.0.0 (bearer token required):
+#   ExecStart=REPLACE_WITH_PROJECT_ROOT/.venv/bin/protonwg api --bind-host 0.0.0.0 --bind-port 8787
 ExecStart=REPLACE_WITH_PROJECT_ROOT/.venv/bin/protonwg api --bind-host 127.0.0.1 --bind-port 8787
+
 Restart=on-failure
 RestartSec=5s
-# Long-running: do NOT set TimeoutStartSec; we want systemd to consider it
-# started as soon as ExecStart runs, and it stays up forever.
 StandardOutput=journal
 StandardError=journal
-
-# Uncomment to bind to the LAN instead of loopback. Only do this if you've
-# put an auth layer in front (reverse proxy with basic auth, mTLS, etc.):
-#   ExecStart=…/protonwg api --bind-host 0.0.0.0 --bind-port 8787
 
 [Install]
 WantedBy=multi-user.target

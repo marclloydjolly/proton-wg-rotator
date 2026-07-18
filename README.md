@@ -306,8 +306,10 @@ sudo systemctl enable --now protonwg-api.service
 curl -s http://127.0.0.1:8787/health
 ```
 
-Runs as root (needed for `wg show`, `systemctl start protonwg-*`),
-binds to loopback only, no auth (trust boundary is "same host").
+Runs as root (needed for `wg show`, `systemctl start protonwg-*`).
+Defaults to a loopback bind with no auth (same-host trust). When bound
+to anything else (e.g. a LAN IP), a bearer token is auto-generated to
+`state/api-token` and required on every request except `/health`.
 
 ### Endpoints
 

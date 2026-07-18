@@ -29,8 +29,13 @@ Routes:
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
+import os
+import secrets
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -42,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from ._fsutil import chown_to_parent_owner
 from .api import ProtonClient
 from .hotloop import (
     HotLoopState,
@@ -51,6 +57,43 @@ from .hotloop import (
 )
 from .library import Library
 from .paths import ProjectPaths
+
+
+# ---- auth -----------------------------------------------------------------
+
+
+def _is_loopback(host: str) -> bool:
+    """Is this bind host a loopback address? Loopback binds skip auth by default."""
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_loopback
+    except ValueError:
+        return host in ("localhost",)
+
+
+def resolve_or_generate_token(token_path: Path, cli_token: str | None) -> str:
+    """
+    Pick / persist the API bearer token.
+
+    Precedence:
+      1. --auth-token CLI flag (or PROTONWG_API_TOKEN env var), if set.
+      2. Existing token in state/api-token.
+      3. Fresh 32-byte random token, written to state/api-token (chmod 0600,
+         chown to parent-dir owner).
+
+    Returning the same token across restarts means the frontend doesn't
+    need reconfiguring every time the rotator bounces.
+    """
+    if cli_token:
+        return cli_token
+    if token_path.exists():
+        return token_path.read_text().strip()
+    token = secrets.token_urlsafe(32)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(token + "\n")
+    os.chmod(token_path, stat.S_IRUSR | stat.S_IWUSR)
+    chown_to_parent_owner(token_path)
+    return token
 
 
 # ---- state cache ----------------------------------------------------------
@@ -279,6 +322,37 @@ class _Handler(BaseHTTPRequestHandler):
     def _get_iface(self) -> str:
         return self.server.iface  # type: ignore[attr-defined]
 
+    def _authorised(self) -> bool:
+        """
+        Enforce Authorization: Bearer <token> when the server requires auth.
+        /health is always public so external monitors can probe.
+        OPTIONS is always allowed for CORS preflight.
+        """
+        token = getattr(self.server, "auth_token", None)  # type: ignore[attr-defined]
+        if token is None:
+            return True
+        if self.command == "OPTIONS":
+            return True
+        if self.path.split("?", 1)[0] == "/health":
+            return True
+        header = self.headers.get("Authorization", "")
+        if not header.lower().startswith("bearer "):
+            return False
+        supplied = header[len("Bearer "):].strip()
+        return hmac.compare_digest(supplied, token)
+
+    def _reject_unauthenticated(self) -> None:
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Bearer realm="protonwg"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        body = json.dumps(
+            {"error": "unauthorised", "hint": "send Authorization: Bearer <token>"}
+        ).encode("utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     # ---- HTTP verbs -------------------------------------------------------
 
     def do_OPTIONS(self) -> None:  # noqa: N802
@@ -286,6 +360,9 @@ class _Handler(BaseHTTPRequestHandler):
         self._write(204, b"", "text/plain")
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._authorised():
+            self._reject_unauthenticated()
+            return
         path = self.path.split("?", 1)[0]
 
         if path == "/health":
@@ -350,6 +427,9 @@ class _Handler(BaseHTTPRequestHandler):
         self._not_found()
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._authorised():
+            self._reject_unauthenticated()
+            return
         path = self.path.split("?", 1)[0]
 
         if path.startswith("/actions/"):
@@ -394,11 +474,14 @@ class _ApiServer(ThreadingHTTPServer):
         paths: ProjectPaths,
         iface: str,
         cache_ttl: float,
+        auth_token: str | None,
     ):
         super().__init__(addr, handler)
         self.paths = paths
         self.iface = iface
         self.state_cache = StateCache(ttl_seconds=cache_ttl)
+        # None = auth disabled; string = required Bearer token.
+        self.auth_token = auth_token
 
 
 def serve(
@@ -408,20 +491,49 @@ def serve(
     bind_port: int = 8787,
     iface: str = "wg0",
     cache_ttl: float = 1.0,
+    auth_token: str | None = None,
+    no_auth: bool = False,
 ) -> int:
     paths = ProjectPaths.from_root(project_root)
+
+    # Auth policy:
+    #   --no-auth              -> off, no matter the bind
+    #   loopback bind          -> off by default (same-host trust)
+    #   any other bind         -> ON, token resolved-or-generated
+    if no_auth:
+        effective_token: str | None = None
+        auth_note = "disabled (--no-auth)"
+    elif _is_loopback(bind_host):
+        effective_token = auth_token  # allow explicit override even on loopback
+        auth_note = (
+            "disabled (loopback bind; same-host trust)"
+            if effective_token is None
+            else "enabled (explicit --auth-token on loopback)"
+        )
+    else:
+        effective_token = resolve_or_generate_token(paths.api_token, auth_token)
+        auth_note = f"enabled (token at {paths.api_token})"
+
     server = _ApiServer(
         (bind_host, bind_port),
         _Handler,
         paths=paths,
         iface=iface,
         cache_ttl=cache_ttl,
+        auth_token=effective_token,
     )
     print(
         f"protonwg api {__version__} listening on http://{bind_host}:{bind_port} "
-        f"(iface={iface}, cache_ttl={cache_ttl}s)",
+        f"(iface={iface}, cache_ttl={cache_ttl}s, auth={auth_note})",
         file=sys.stderr,
     )
+    if effective_token is not None and auth_token is None and not _is_loopback(bind_host):
+        # Print the token so root+journalctl viewers can copy it. It's also
+        # in state/api-token but this saves an extra step.
+        print(
+            f"protonwg api: bearer token = {effective_token}",
+            file=sys.stderr,
+        )
 
     stop = threading.Event()
 

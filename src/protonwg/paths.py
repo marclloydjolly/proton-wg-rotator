@@ -51,3 +51,7 @@ class ProjectPaths:
     @property
     def hotloop_state(self) -> Path:
         return self.state_dir / "hotloop.json"
+
+    @property
+    def api_token(self) -> Path:
+        return self.state_dir / "api-token"

@@ -296,22 +296,76 @@ Prioritised, roughly by usefulness:
 
 ---
 
-## 7. The HTTP API — use this (shipped in v0.3.0)
+## 7. The HTTP API — use this (shipped in v0.3.0, LAN-reachable in v0.3.1)
 
 **The rotator now ships a small HTTP API.** Use it. Don't scrape files —
 that's the fallback if the API isn't running.
 
-- **Binding:** `http://127.0.0.1:8787` on the same host (loopback only).
+- **Binding:** configurable. Default is `http://127.0.0.1:8787` (same
+  host). On Marc's install it's `http://192.168.2.245:8787` so LAN
+  clients (like the WAN tester frontend) can reach it.
 - **Systemd unit:** `protonwg-api.service` (`Type=simple`, `User=root`,
   `Restart=on-failure`, `WantedBy=multi-user.target`).
 - **Deps:** stdlib only (`http.server.ThreadingHTTPServer`). No FastAPI,
   no uvicorn.
-- **Auth:** none. Trust boundary is "processes on the same host". Do NOT
-  rebind to `0.0.0.0` without adding an auth layer.
-- **CORS:** `Access-Control-Allow-Origin: *` — the loopback bind is the
-  actual protection.
+- **Auth:** **bearer token required whenever the bind is not loopback.**
+  Auto-generated on first non-loopback start, stored in
+  `state/api-token` (chmod 0600, owned by the user). Survives restarts.
+  Send `Authorization: Bearer <token>` on every request except
+  `/health`. Loopback binds still skip auth (same-host trust). See §7a.
+- **CORS:** `Access-Control-Allow-Origin: *` — the token is the actual
+  protection when bound off-loopback.
 - **State cache:** 1 s in-memory. A frontend polling `/state` at 4 Hz
   still only hits Proton once per second.
+
+## 7a. Authentication
+
+If the API is bound to anything other than a loopback address (127.0.0.1
+or ::1), **every request except `GET /health` must send a bearer token**:
+
+```
+Authorization: Bearer <token>
+```
+
+Without the header, or with a wrong token, you get:
+
+```
+HTTP/1.1 401 Unauthorised
+WWW-Authenticate: Bearer realm="protonwg"
+Content-Type: application/json
+
+{"error": "unauthorised", "hint": "send Authorization: Bearer <token>"}
+```
+
+### How to get the token
+
+Ask the operator to run this on the rotator host:
+
+```bash
+sudo cat /home/marcjolly/proton-wg-rotator/state/api-token
+```
+
+(Or `journalctl -u protonwg-api.service | grep 'bearer token'` — the API
+prints it on startup for first-time-generation runs.)
+
+Store it in the frontend's config. It's a single opaque string,
+URL-safe base64, ~44 characters. It does not expire.
+
+### `/health` is public on purpose
+
+External uptime monitors and dashboards can hit `GET /health` without a
+token to check "is the API alive?". No sensitive data is exposed — it
+returns `{ok, version, timestamp}`.
+
+### If you need to rotate the token
+
+Delete the file and restart:
+
+```bash
+sudo rm /home/marcjolly/proton-wg-rotator/state/api-token
+sudo systemctl restart protonwg-api.service
+sudo cat /home/marcjolly/proton-wg-rotator/state/api-token   # new one
+```
 
 ### Endpoints
 
@@ -403,21 +457,29 @@ Fields the frontend most likely wants:
 - **`history.last_swap_at`** — timestamp for a "last swapped Nm ago"
   badge. `swap_count_total` for a lifetime counter.
 
-### Actions — quick fetch examples
+### Fetch examples (with auth)
 
 ```js
-// force a liveness check now (async, returns 202 immediately)
-await fetch("http://localhost:8787/actions/health-check", { method: "POST" });
+const API = "http://192.168.2.245:8787";   // Marc's install; adapt to yours
+const TOKEN = process.env.PROTONWG_API_TOKEN;   // from state/api-token on the rotator host
 
-// re-pick the pool synchronously (5s-ish; returns actual result)
-const r = await fetch("http://localhost:8787/actions/rebuild-pool", { method: "POST" });
+const headers = { "Authorization": `Bearer ${TOKEN}` };
+
+// force a liveness check now (async, returns 202 immediately)
+await fetch(`${API}/actions/health-check`, { method: "POST", headers });
+
+// re-pick the pool synchronously (~5 s; returns actual result)
+const r = await fetch(`${API}/actions/rebuild-pool`, { method: "POST", headers });
 const { ok, stdout } = await r.json();
 
 // polling loop for the dashboard
 setInterval(async () => {
-  const s = await fetch("http://localhost:8787/state").then(r => r.json());
+  const s = await fetch(`${API}/state`, { headers }).then(r => r.json());
   render(s);
 }, 2000);   // 2 s is fine; server caches state for 1 s so ~half get cache hits
+
+// public liveness check — no token needed
+const alive = await fetch(`${API}/health`).then(r => r.ok);
 ```
 
 ### Fallback if the API isn't running
