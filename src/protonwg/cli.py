@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .commands import api as api_cmd
 from .commands import health_check as health_check_cmd
 from .commands import init as init_cmd
 from .commands import list_cmd
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     swap_check_cmd.add_subparser(subparsers)
     swap_status_cmd.add_subparser(subparsers)
     health_check_cmd.add_subparser(subparsers)
+    api_cmd.add_subparser(subparsers)
     return parser
 
 

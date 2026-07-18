@@ -19,11 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-import requests
-
 from .library import PoolEntry
 
-PROTON_LOADS_URL = "https://vpn-api.proton.me/vpn/loads"
 APP_VERSION = "linux-vpn@4.13.1"
 USER_AGENT = "ProtonVPN/4.13.1 (Linux; Ubuntu)"
 
@@ -108,6 +105,9 @@ class HotLoopState:
             json.dump(payload, fh, indent=2)
         os.chmod(tmp, 0o644)
         tmp.replace(path)
+        # See _fsutil: prevent root-owned state files after root writes.
+        from ._fsutil import chown_to_parent_owner
+        chown_to_parent_owner(path)
 
 
 # ---- decision -------------------------------------------------------------
@@ -306,14 +306,31 @@ def decide(
 # ---- probes ---------------------------------------------------------------
 
 
-def fetch_loads(timeout_s: int = 15) -> dict[str, dict]:
-    r = requests.get(
-        PROTON_LOADS_URL,
-        headers={"x-pm-appversion": APP_VERSION, "User-Agent": USER_AGENT},
-        timeout=timeout_s,
-    )
-    r.raise_for_status()
-    return {s["ID"]: s for s in r.json().get("LogicalServers", [])}
+def fetch_loads(client) -> dict[str, dict]:
+    """
+    Return live per-logical metrics as ``{logical_id: {"Score", "Load", "Status"}}``.
+
+    Sourced from the authenticated ``/vpn/v1/logicals`` endpoint (the
+    unauthenticated ``/vpn/loads`` endpoint was deprecated by Proton and
+    now returns an empty list for all app-version strings — see git
+    commit history for the discovery).
+
+    Requires an active ``ProtonClient`` with a loaded session. All callers
+    (swap-check, health-check, apiserver) run as root, so they can read
+    the user-owned ``state/session.json`` regardless of its 0600 perms.
+    """
+    logicals = client.get_logicals()
+    out: dict[str, dict] = {}
+    for s in logicals:
+        sid = s.get("ID")
+        if sid is None:
+            continue
+        out[sid] = {
+            "Score": s.get("Score", 1e6),
+            "Load": s.get("Load", 100),
+            "Status": s.get("Status", 0),
+        }
+    return out
 
 
 def _wg_cmd(args: list[str]) -> list[str]:
@@ -365,6 +382,80 @@ def get_handshake_age_seconds(iface: str) -> int | None:
     if ts == 0:
         return None
     return int(time.time()) - ts
+
+
+@dataclass
+class TunnelSnapshot:
+    """One-shot view of the current wg interface, parsed from `wg show ... dump`."""
+
+    peer_pubkey: str | None
+    endpoint: str | None  # "ip:port" or None if peer never contacted
+    endpoint_ip: str | None
+    endpoint_port: int | None
+    handshake_age_s: int | None
+    rx_bytes: int | None
+    tx_bytes: int | None
+    keepalive_s: int | None
+
+    @classmethod
+    def empty(cls) -> "TunnelSnapshot":
+        return cls(None, None, None, None, None, None, None, None)
+
+
+def get_tunnel_snapshot(iface: str) -> TunnelSnapshot:
+    """Parse `wg show <iface> dump` once and return everything the API surfaces."""
+    try:
+        r = subprocess.run(
+            _wg_cmd(["show", iface, "dump"]),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return TunnelSnapshot.empty()
+    lines = [ln for ln in r.stdout.strip().split("\n") if ln]
+    if len(lines) < 2:
+        return TunnelSnapshot.empty()
+    # Peer line fields, tab-separated:
+    #   0=pubkey  1=psk  2=endpoint  3=allowed-ips  4=latest-handshake-unix
+    #   5=rx-bytes  6=tx-bytes  7=keepalive-sec
+    fields = lines[1].split("\t")
+    if len(fields) < 8:
+        return TunnelSnapshot.empty()
+
+    pubkey = fields[0] or None
+    endpoint_raw = fields[2] if fields[2] and fields[2] != "(none)" else None
+    endpoint_ip: str | None = None
+    endpoint_port: int | None = None
+    if endpoint_raw and ":" in endpoint_raw:
+        # IPv4 "ip:port" or IPv6 "[::1]:port"; only IPv4 supported by pool today.
+        try:
+            ip_part, port_part = endpoint_raw.rsplit(":", 1)
+            endpoint_ip = ip_part.strip("[]")
+            endpoint_port = int(port_part)
+        except (ValueError, IndexError):
+            pass
+
+    def _maybe_int(v: str) -> int | None:
+        try:
+            return int(v)
+        except ValueError:
+            return None
+
+    hs_unix = _maybe_int(fields[4])
+    hs_age = int(time.time()) - hs_unix if hs_unix and hs_unix > 0 else None
+
+    return TunnelSnapshot(
+        peer_pubkey=pubkey,
+        endpoint=endpoint_raw,
+        endpoint_ip=endpoint_ip,
+        endpoint_port=endpoint_port,
+        handshake_age_s=hs_age,
+        rx_bytes=_maybe_int(fields[5]),
+        tx_bytes=_maybe_int(fields[6]),
+        keepalive_s=_maybe_int(fields[7]),
+    )
 
 
 # ---- execution ------------------------------------------------------------

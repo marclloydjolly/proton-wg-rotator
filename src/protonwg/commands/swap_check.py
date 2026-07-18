@@ -85,10 +85,20 @@ def run(args: argparse.Namespace) -> int:
     current_pubkey = get_current_peer_pubkey(policy.interface)
     handshake_age = get_handshake_age_seconds(policy.interface)
 
+    from ..api import ProtonClient
+
+    client = ProtonClient(paths.session_file)
+    if not client.is_logged_in():
+        print(
+            "Not logged in. Run `protonwg login` first.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
-        loads = fetch_loads()
+        loads = fetch_loads(client)
     except Exception as exc:
-        print(f"Failed to fetch /vpn/loads: {exc}", file=sys.stderr)
+        print(f"Failed to fetch live server metrics: {exc}", file=sys.stderr)
         return 1
 
     decision = decide(lib.pool, loads, current_pubkey, handshake_age, state, policy)

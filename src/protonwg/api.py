@@ -21,6 +21,8 @@ from typing import Any
 from proton.api import Session
 from proton.exceptions import ProtonError
 
+from ._fsutil import chown_to_parent_owner
+
 # See research notes: Linux-app version string; web-* triggers CAPTCHA (code 9001).
 API_URL = "https://vpn-api.proton.me"
 APP_VERSION = "linux-vpn@4.13.1"
@@ -114,6 +116,10 @@ class ProtonClient:
             json.dump(self._session.dump(), fh, indent=2)
         os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
         tmp.replace(self.session_path)
+        # If we're root, hand the file back to the owning user so a
+        # subsequent user-run (e.g. `protonwg refresh` as marcjolly) can
+        # still read the 0600 file.
+        chown_to_parent_owner(self.session_path)
 
     def _ensure_session(self) -> Session:
         if self._session is None:

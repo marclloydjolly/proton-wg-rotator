@@ -283,9 +283,61 @@ protonwg health-check       Liveness probe: ping the internet; on failure,
 
 protonwg notify-setup       Interactively configure SMTP for email reports.
 protonwg notify-test        Send a synthetic report to verify SMTP works.
+
+protonwg api                Run the HTTP API server (see below).
 ```
 
 Each command's `--help` lists its flags.
+
+---
+
+## HTTP API (v0.3.0+)
+
+For frontend integration — a dashboard, the WAN-tester UI, or anything
+else that wants to inspect state and trigger actions programmatically.
+
+### Install as a systemd service
+
+```bash
+sudo cp systemd/protonwg-api.service /etc/systemd/system/
+sudoedit /etc/systemd/system/protonwg-api.service    # replace REPLACE_WITH_PROJECT_ROOT
+sudo systemctl daemon-reload
+sudo systemctl enable --now protonwg-api.service
+curl -s http://127.0.0.1:8787/health
+```
+
+Runs as root (needed for `wg show`, `systemctl start protonwg-*`),
+binds to loopback only, no auth (trust boundary is "same host").
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | Liveness + version + timestamp. |
+| GET | `/state` | Everything merged: cert + current tunnel + pool with live scores + history. **The one to use.** Cached 1 s. |
+| GET | `/pool` | Just the pool array with live scores. |
+| GET | `/tunnel` | Just the current wg0 state (peer, endpoint, handshake age, rx/tx). |
+| GET | `/cert` | Cert serial + expiry. |
+| GET | `/history` | `hotloop.json` contents (last swap timestamp/target/result). |
+| POST | `/actions/health-check` | Kick `protonwg-health-check.service` (async, 202). |
+| POST | `/actions/swap-check` | Kick `protonwg-swap-check.service` (async, 202). |
+| POST | `/actions/refresh` | Kick `protonwg-refresh.service` (async, 202). |
+| POST | `/actions/rebuild-pool` | Run `protonwg rebuild-pool` synchronously (~2–5s). |
+
+For a full response-shape reference plus a suggested frontend surface,
+see [`docs/frontend-integration-brief.md`](docs/frontend-integration-brief.md).
+
+### Tunables
+
+```bash
+protonwg api \
+  --bind-host 127.0.0.1 \
+  --bind-port 8787 \
+  --interface wg0 \
+  --cache-ttl 1.0
+```
+
+Do NOT bind to `0.0.0.0` without adding an auth layer.
 
 ---
 

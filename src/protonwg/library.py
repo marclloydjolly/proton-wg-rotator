@@ -111,6 +111,9 @@ class Library:
         with tmp.open("w") as fh:
             json.dump(payload, fh, indent=2)
         tmp.replace(path)
+        # See _fsutil: prevent root-owned library files after root writes.
+        from ._fsutil import chown_to_parent_owner
+        chown_to_parent_owner(path)
 
     # ---- lookups -----------------------------------------------------------
 

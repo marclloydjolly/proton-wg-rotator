@@ -141,11 +141,22 @@ def run(args: argparse.Namespace) -> int:
         interface=args.interface,
     )
 
+    from ..api import ProtonClient
+
+    client = ProtonClient(paths.session_file)
+    if not client.is_logged_in():
+        print(
+            "Not logged in. Run `protonwg login` first — cannot fetch live "
+            "server metrics for recovery.",
+            file=sys.stderr,
+        )
+        return 5
+
     try:
-        loads = fetch_loads()
+        loads = fetch_loads(client)
     except Exception as exc:
         print(
-            f"Failed to fetch /vpn/loads even with LAN route: {exc}",
+            f"Failed to fetch live server metrics even with LAN route: {exc}",
             file=sys.stderr,
         )
         return 6
