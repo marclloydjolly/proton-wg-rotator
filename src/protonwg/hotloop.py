@@ -156,8 +156,10 @@ def decide(
     state: HotLoopState,
     policy: Policy,
     now: datetime | None = None,
+    exclude_logical_ids: set[str] | None = None,
 ) -> Decision:
     now = now or datetime.now(timezone.utc)
+    exclude_logical_ids = exclude_logical_ids or set()
     ranked = rank_pool(pool, loads, current_pubkey)
     live = [c for c in ranked if c.metrics.status == 1]
 
@@ -168,7 +170,11 @@ def decide(
             ranked=ranked,
         )
 
-    best = live[0]
+    # Prefer candidates that haven't recently failed a real-world check. Fall
+    # back to the full live set if exclusion would leave nothing (better a
+    # suspect server than none).
+    available = [c for c in live if c.entry.logical_id not in exclude_logical_ids] or live
+    best = available[0]
     current = next((c for c in ranked if c.is_current), None)
 
     # Bootstrap: the interface isn't on a pool peer (e.g. still on the original
