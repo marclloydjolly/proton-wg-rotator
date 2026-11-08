@@ -95,3 +95,15 @@ def test_no_exclusion_picks_best():
     loads = _loads({"lid1": 1.90, "lid2": 1.40})  # lid2 best
     d = decide(pool, loads, None, None, HotLoopState(), Policy())
     assert d.target.logical_id == "lid2"
+
+
+# ---- health-check default-route parsing ----------------------------------
+
+
+def test_parse_default_dev_picks_tunnel_vs_direct():
+    from protonwg.commands.health_check import _parse_default_dev
+    assert _parse_default_dev("default via 10.100.0.1 dev wg0 \n") == "wg0"
+    assert _parse_default_dev("default via 192.168.2.254 dev enp3s0f0\n") == "enp3s0f0"
+    assert _parse_default_dev("") is None
+    # A non-default route line must not be mistaken for the default dev.
+    assert _parse_default_dev("10.0.0.0/24 dev eth0\n") is None
