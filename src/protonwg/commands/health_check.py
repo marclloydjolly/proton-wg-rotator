@@ -82,6 +82,27 @@ def _internet_up(targets: list[str], *, count: int, timeout: int) -> tuple[bool,
     return False, failed
 
 
+def _parse_default_dev(ip_route_output: str) -> str | None:
+    """Parse `ip route show default` -> the `dev <iface>` of the first default."""
+    for line in ip_route_output.splitlines():
+        fields = line.split()
+        if fields[:1] == ["default"] and "dev" in fields:
+            return fields[fields.index("dev") + 1]
+    return None
+
+
+def _default_route_dev() -> str | None:
+    """Interface the current default route points at (None if none)."""
+    try:
+        r = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    return _parse_default_dev(r.stdout)
+
+
 def _systemctl(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=30)
 
@@ -118,16 +139,30 @@ def run(args: argparse.Namespace) -> int:
             )
             return 3
 
-    # ---- Happy path: internet works through at least one canary ---------
+    # ---- Happy path: the tunnel is the active route AND it carries traffic.
+    # Both checks matter. When wg0 is down the Mini falls back to DIRECT
+    # internet, so a plain canary check passes while every client is blackholed
+    # by the kill-switch (iif LAN, oif != wg0 -> drop). Requiring the default
+    # route to be the tunnel catches that blind spot (and a route leak).
     up, failed = _internet_up(canaries, count=args.probe_count, timeout=args.probe_timeout)
-    if up:
+    route_dev = _default_route_dev()
+    tunnel_is_route = route_dev == args.interface
+    if up and tunnel_is_route:
         return 0
 
-    # ---- Sad path: every canary failed. Recovery starts here. -----------
-    print(
-        f"All {len(canaries)} canaries unreachable ({', '.join(failed)}) "
-        f"[{args.probe_count} attempts each]. Initiating {args.interface} recovery."
-    )
+    # ---- Sad path: tunnel not the active route, or internet down. ---------
+    if not tunnel_is_route:
+        print(
+            f"Default route is via {route_dev or 'unknown'}, not {args.interface} "
+            f"- the tunnel is down and clients are cut off by the kill-switch "
+            f"(the Mini's own internet may still work directly). "
+            f"Initiating {args.interface} recovery."
+        )
+    else:
+        print(
+            f"All {len(canaries)} canaries unreachable ({', '.join(failed)}) "
+            f"[{args.probe_count} attempts each]. Initiating {args.interface} recovery."
+        )
 
     if args.dry_run:
         print(f"(--dry-run: would stop wg-quick@{args.interface} and swap)")
@@ -136,17 +171,21 @@ def run(args: argparse.Namespace) -> int:
     state = HotLoopState.load(paths.hotloop_state)
     mem = HealthMemory.load(paths.health_state)
 
-    # ---- Circuit breaker: stop thrashing --------------------------------
+    # ---- Chronic-instability alert (fail-safe) --------------------------
+    # We deliberately do NOT stop recovering here. health-check only runs when
+    # we're already offline, so halting would strand every client behind the
+    # kill-switch (exactly the blackout we want to avoid). Instead we alert
+    # loudly and keep trying. Failure memory + verify-after-swap below stop us
+    # settling on a server that does not actually route.
     recent = mem.swaps_in_window(args.swap_window_minutes)
     if recent >= args.max_swaps_per_window:
         print(
-            f"CIRCUIT BREAKER: {recent} swaps in the last "
+            f"CHRONIC INSTABILITY: {recent} swaps in the last "
             f"{args.swap_window_minutes}m (limit {args.max_swaps_per_window}). "
-            f"Leaving {args.interface} in place and NOT swapping — the pool or "
-            "upstream is unstable; manual attention needed.",
+            f"The pool or upstream is unstable and needs attention - continuing "
+            f"recovery to keep clients online rather than leaving the tunnel down.",
             file=sys.stderr,
         )
-        return 10
 
     # Remember which server we're leaving (it just failed its internet check),
     # so recovery won't immediately re-select it.
