@@ -21,8 +21,8 @@ from typing import Literal
 
 from .library import PoolEntry
 
-APP_VERSION = "linux-vpn@4.13.1"
-USER_AGENT = "ProtonVPN/4.13.1 (Linux; Ubuntu)"
+APP_VERSION = "linux-vpn@4.18.2"
+USER_AGENT = "ProtonVPN/4.18.2 (Linux; Ubuntu)"
 
 Action = Literal["stay", "swap", "emergency_swap", "bootstrap_swap", "error"]
 

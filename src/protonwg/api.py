@@ -25,8 +25,8 @@ from ._fsutil import chown_to_parent_owner
 
 # See research notes: Linux-app version string; web-* triggers CAPTCHA (code 9001).
 API_URL = "https://vpn-api.proton.me"
-APP_VERSION = "linux-vpn@4.13.1"
-USER_AGENT = "ProtonVPN/4.13.1 (Linux; Ubuntu)"
+APP_VERSION = "linux-vpn@4.18.2"
+USER_AGENT = "ProtonVPN/4.18.2 (Linux; Ubuntu)"
 
 # Proton API error strings we recognise as "access token expired, try refresh".
 # We match on substring because ProtonError exposes the message as str() only.
@@ -102,6 +102,14 @@ class ProtonClient:
     def _load_session(self) -> Session:
         with self.session_path.open("r") as fh:
             dump = json.load(fh)
+        # Proton enforces a MINIMUM app version and rejects stale ones with
+        # "This version of the app is no longer supported". The appversion is
+        # baked into the session's request headers at construction from
+        # dump["appversion"], so overwrite the stored value with the current
+        # constant on every load. This way a future Proton bump only needs the
+        # APP_VERSION constant updated — no re-login, no reauth.
+        dump["appversion"] = APP_VERSION
+        dump["user_agent"] = USER_AGENT
         # Session.load is a static method that returns a fresh Session object
         # with the dump applied; calling it as an instance method throws the
         # loaded state away and returns nothing.
