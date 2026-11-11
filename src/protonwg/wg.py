@@ -73,6 +73,10 @@ def render_router(
 ) -> str:
     """Render a router-mode config mirroring Marc's existing wg0.conf shape."""
     mtu_line = f"MTU = {router.mtu}\n" if router.mtu is not None else ""
+    # WireGuard's default MTU is 1420 (1500 underlay - 80B overhead). Clamp the
+    # forwarded TCP MSS to MTU-40 so client packets can't exceed the tunnel MTU.
+    wg_mtu = router.mtu if router.mtu is not None else 1420
+    clamp_mss = wg_mtu - 40  # 20B IPv4 + 20B TCP headers
     return (
         "[Interface]\n"
         f"PrivateKey = {identity_priv_key_b64}\n"
@@ -93,6 +97,14 @@ def render_router(
         "PostUp   = sysctl -w net.ipv4.ip_forward=1\n"
         f"PostUp   = iptables -t nat -A POSTROUTING -o {interface_name} -j MASQUERADE\n"
         f"PostDown = iptables -t nat -D POSTROUTING -o {interface_name} -j MASQUERADE\n"
+        "\n"
+        "# Clamp forwarded TCP MSS to the tunnel MTU. Without this, LAN clients\n"
+        "# (MTU 1500) send packets too big for the wg MTU; they are silently\n"
+        "# dropped (PMTU blackhole) and forwarded throughput collapses.\n"
+        f"PostUp   = iptables -t mangle -A FORWARD -o {interface_name} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {clamp_mss}\n"
+        f"PostUp   = iptables -t mangle -A FORWARD -i {interface_name} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {clamp_mss}\n"
+        f"PostDown = iptables -t mangle -D FORWARD -o {interface_name} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {clamp_mss}\n"
+        f"PostDown = iptables -t mangle -D FORWARD -i {interface_name} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {clamp_mss}\n"
         "\n"
         "[Peer]\n"
         f"# {entry.logical_name} ({entry.city}, {entry.country})\n"
