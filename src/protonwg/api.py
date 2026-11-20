@@ -22,6 +22,12 @@ from proton.api import Session
 from proton.exceptions import ProtonError
 
 from ._fsutil import chown_to_parent_owner
+from .appversion import (
+    VERSION_PROBE_ENDPOINT,
+    VERSION_REJECTED_MARKERS,
+    candidate_versions,
+    ver_tuple,
+)
 
 # See research notes: Linux-app version string; web-* triggers CAPTCHA (code 9001).
 API_URL = "https://vpn-api.proton.me"
@@ -99,21 +105,67 @@ class ProtonClient:
     def is_logged_in(self) -> bool:
         return self.session_path.exists()
 
+    @property
+    def _appversion_file(self) -> Path:
+        return self.session_path.parent / "appversion"
+
+    def _read_persisted_appversion(self) -> str | None:
+        try:
+            v = self._appversion_file.read_text().strip()
+            return v or None
+        except OSError:
+            return None
+
+    def _effective_appversion(self) -> str:
+        """The app version to send: a self-healed one if newer, else the
+        compiled-in constant (a deploy that bumps the constant wins over a
+        stale persisted value)."""
+        persisted = self._read_persisted_appversion()
+        if persisted and ver_tuple(persisted) >= ver_tuple(APP_VERSION):
+            return persisted
+        return APP_VERSION
+
+    def _persist_appversion(self, appversion: str) -> None:
+        try:
+            self._appversion_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._appversion_file.with_suffix(".tmp")
+            tmp.write_text(appversion + "\n")
+            os.chmod(tmp, 0o644)
+            tmp.replace(self._appversion_file)
+            chown_to_parent_owner(self._appversion_file)
+        except OSError:
+            pass
+
     def _load_session(self) -> Session:
         with self.session_path.open("r") as fh:
             dump = json.load(fh)
         # Proton enforces a MINIMUM app version and rejects stale ones with
         # "This version of the app is no longer supported". The appversion is
         # baked into the session's request headers at construction from
-        # dump["appversion"], so overwrite the stored value with the current
-        # constant on every load. This way a future Proton bump only needs the
-        # APP_VERSION constant updated — no re-login, no reauth.
-        dump["appversion"] = APP_VERSION
+        # dump["appversion"], so overwrite the stored value with the effective
+        # version (self-healed if present, else the constant) on every load.
+        dump["appversion"] = self._effective_appversion()
         dump["user_agent"] = USER_AGENT
         # Session.load is a static method that returns a fresh Session object
         # with the dump applied; calling it as an instance method throws the
         # loaded state away and returns nothing.
         return Session.load(dump, TLSPinning=False)
+
+    def _heal_appversion(self, sess: Session) -> bool:
+        """Proton rejected our app version. Probe newer ones; on the first the
+        server accepts, update the live session header, persist it, and report
+        success so the caller can retry. Returns False if none worked."""
+        start = self._effective_appversion()
+        for cand in candidate_versions(start):
+            sess.s.headers["x-pm-appversion"] = cand
+            try:
+                sess.api_request(VERSION_PROBE_ENDPOINT)
+            except ProtonError:
+                continue  # rejected or transient — try the next candidate
+            self._persist_appversion(cand)
+            return True
+        sess.s.headers["x-pm-appversion"] = start  # restore
+        return False
 
     def _save(self) -> None:
         if self._session is None:
@@ -147,12 +199,27 @@ class ProtonClient:
         jsondata: dict[str, Any] | None = None,
         method: str | None = None,
         _retried_after_refresh: bool = False,
+        _retried_after_heal: bool = False,
     ) -> dict[str, Any]:
         sess = self._ensure_session()
         try:
             try:
                 resp = sess.api_request(endpoint, jsondata=jsondata, method=method)
             except ProtonError as exc:
+                msg = str(exc)
+                # Proton bumped the minimum app version and rejected ours.
+                # Probe for one it accepts, adopt + persist it, and retry.
+                if any(m in msg for m in VERSION_REJECTED_MARKERS):
+                    if _retried_after_heal or not self._heal_appversion(sess):
+                        raise
+                    self._save()
+                    return self._call(
+                        endpoint,
+                        jsondata=jsondata,
+                        method=method,
+                        _retried_after_refresh=_retried_after_refresh,
+                        _retried_after_heal=True,
+                    )
                 # The cached SRP access token has a short lifetime (typically
                 # ~24h). When it expires the server returns "Invalid access
                 # token" — we should swap it for a fresh one using the
@@ -160,7 +227,6 @@ class ProtonClient:
                 # the original call. If refresh itself fails (refresh token
                 # also expired, account changed, etc.) the user has to
                 # re-login.
-                msg = str(exc)
                 is_auth_expired = any(m in msg for m in _AUTH_EXPIRED_MARKERS)
                 if not is_auth_expired or _retried_after_refresh:
                     raise
