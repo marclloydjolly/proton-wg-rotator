@@ -25,8 +25,8 @@ from ._fsutil import chown_to_parent_owner
 
 # See research notes: Linux-app version string; web-* triggers CAPTCHA (code 9001).
 API_URL = "https://vpn-api.proton.me"
-APP_VERSION = "linux-vpn@4.18.2"
-USER_AGENT = "ProtonVPN/4.18.2 (Linux; Ubuntu)"
+APP_VERSION = "linux-vpn@4.19.1"
+USER_AGENT = "ProtonVPN/4.19.1 (Linux; Ubuntu)"
 
 # Proton API error strings we recognise as "access token expired, try refresh".
 # We match on substring because ProtonError exposes the message as str() only.
